@@ -10,12 +10,17 @@ Phone      : http://<your-pc-ip>:8000  (same Wi-Fi)
 """
 
 import argparse
+import atexit
 import math
+import os
 import random
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import serial
 import serial.tools.list_ports
@@ -28,6 +33,12 @@ from pydantic import BaseModel
 N_LEDS    = 71
 BAUD_RATE = 115200
 FPS_DELAY = 0.04   # 25 fps — device turns off without continuous frames
+
+# 3-side layout (left, top, right) LED counts by monitor size.
+LED_COUNT_3SIDE_BY_INCHES = {
+    34: 71,
+}
+PID_FILE = Path(__file__).with_name('skydimo_server.pid')
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 _state_lock = threading.Lock()
@@ -42,6 +53,45 @@ state: dict = {
 
 _ser_lock = threading.Lock()
 _ser: serial.Serial | None = None
+
+
+def write_pid_file() -> None:
+    PID_FILE.write_text(str(os.getpid()), encoding='ascii')
+
+
+def remove_pid_file() -> None:
+    try:
+        if PID_FILE.exists():
+            PID_FILE.unlink()
+    except Exception:
+        pass
+
+
+def stop_from_pid_file() -> bool:
+    if not PID_FILE.exists():
+        print(f'No running background server found ({PID_FILE.name} is missing).')
+        return False
+
+    try:
+        pid = int(PID_FILE.read_text(encoding='ascii').strip())
+    except Exception:
+        print(f'Cannot read PID from {PID_FILE.name}. Remove file and try again.')
+        return False
+
+    try:
+        subprocess.run(
+            ['taskkill', '/PID', str(pid), '/T', '/F'],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        print(f'Failed to stop process PID {pid}. It may already be stopped.')
+        return False
+
+    remove_pid_file()
+    print(f'Stopped background server (PID {pid}).')
+    return True
 
 
 # ── Skydimo protocol ──────────────────────────────────────────────────────────
@@ -572,9 +622,53 @@ async def api_state():
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description='Skydimo LED Web Server')
+    ap.add_argument(
+        '--inches',
+        type=int,
+        required=False,
+        choices=sorted(LED_COUNT_3SIDE_BY_INCHES.keys()),
+        help='Monitor size in inches for 3-side layout (left, top, right)',
+    )
     ap.add_argument('--port',       type=int, default=8000, help='HTTP port (default: 8000)')
     ap.add_argument('--no-browser', action='store_true',    help='Do not open browser on start')
+    ap.add_argument('--background', action='store_true',    help='Run server in background (internal)')
+    ap.add_argument('--stop',       action='store_true',    help='Stop background server')
     args = ap.parse_args()
+
+    if args.stop:
+        raise SystemExit(0 if stop_from_pid_file() else 1)
+
+    if args.inches is None:
+        ap.error('--inches is required unless --stop is used')
+
+    N_LEDS = LED_COUNT_3SIDE_BY_INCHES[args.inches]
+
+    # Keep current foreground behavior, but allow launching a detached background process.
+    if not args.background and sys.stdin.isatty():
+        answer = input('Run in background and close this console? [y/N]: ').strip().lower()
+        if answer in {'y', 'yes', 'д', 'да'}:
+            cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                '--inches', str(args.inches),
+                '--port', str(args.port),
+                '--background',
+            ]
+            if args.no_browser:
+                cmd.append('--no-browser')
+
+            flags = (
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NO_WINDOW
+            )
+            pid = subprocess.Popen(cmd, cwd=os.getcwd(), close_fds=True, creationflags=flags).pid
+            PID_FILE.write_text(str(pid), encoding='ascii')
+            print(f'Server started in background (PID {pid}).')
+            raise SystemExit(0)
+
+    write_pid_file()
+    atexit.register(remove_pid_file)
 
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{args.port}')).start()
@@ -586,6 +680,9 @@ if __name__ == '__main__':
         ip = '?.?.?.?'
 
     print(f"Skydimo LED Web Server")
+    print(f"  Layout : 3-side (left, top, right)")
+    print(f"  Size   : {args.inches}\"")
+    print(f"  LEDs   : {N_LEDS}")
     print(f"  Local  : http://localhost:{args.port}")
     print(f"  Network: http://{ip}:{args.port}  (open on phone)")
     print(f"  Stop   : Ctrl+C")

@@ -39,7 +39,7 @@ Skydimo uses the CH340 USB serial chip.
 
 ### Step 3: Install Dependencies
 ```bash
-pip install pyserial fastapi uvicorn
+pip install pyserial fastapi uvicorn zeroconf
 ```
 
 ## Run Web UI
@@ -64,10 +64,14 @@ python skydimo_server.py --stop
 Open in browser:
 - Local: `http://localhost:8000`
 - LAN (phone/tablet): `http://<your-pc-ip>:8000`
+- LAN via mDNS: `http://skydimo.local:8000`
 
 Notes:
 - Server listens on `0.0.0.0` for LAN access.
-- If you use a hostname instead of IP, ensure local DNS/mDNS resolves it.
+- The server advertises itself as `skydimo.local` via mDNS (Bonjour/Avahi). This
+  works out of the box on iOS, macOS, and most modern Android devices. On
+  Windows clients, mDNS resolution requires Bonjour (e.g. bundled with iTunes)
+  or another mDNS service to be installed.
 
 ## API Endpoints
 - `GET /` - web UI

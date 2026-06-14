@@ -14,6 +14,7 @@ import atexit
 import math
 import os
 import random
+import socket
 import subprocess
 import sys
 import threading
@@ -28,6 +29,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from zeroconf import Zeroconf, ServiceInfo
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 N_LEDS    = 71
@@ -39,6 +41,7 @@ LED_COUNT_3SIDE_BY_INCHES = {
     34: 71,
 }
 PID_FILE = Path(__file__).with_name('skydimo_server.pid')
+MDNS_HOSTNAME = 'skydimo.local.'
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 _state_lock = threading.Lock()
@@ -65,6 +68,34 @@ def remove_pid_file() -> None:
             PID_FILE.unlink()
     except Exception:
         pass
+
+
+def get_local_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 80))
+        return s.getsockname()[0]
+    except Exception:
+        return '127.0.0.1'
+    finally:
+        s.close()
+
+
+def start_mdns(ip: str, port: int) -> Zeroconf | None:
+    """Advertise this server as skydimo.local via mDNS (Bonjour/Avahi)."""
+    try:
+        zc = Zeroconf()
+        info = ServiceInfo(
+            "_http._tcp.local.",
+            "Skydimo LED._http._tcp.local.",
+            addresses=[socket.inet_aton(ip)],
+            port=port,
+            server=MDNS_HOSTNAME,
+        )
+        zc.register_service(info)
+        return zc
+    except Exception:
+        return None
 
 
 def stop_from_pid_file() -> bool:
@@ -662,7 +693,10 @@ if __name__ == '__main__':
                 | subprocess.DETACHED_PROCESS
                 | subprocess.CREATE_NO_WINDOW
             )
-            pid = subprocess.Popen(cmd, cwd=os.getcwd(), close_fds=True, creationflags=flags).pid
+            pid = subprocess.Popen(
+                cmd, cwd=os.getcwd(), close_fds=True, creationflags=flags,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).pid
             PID_FILE.write_text(str(pid), encoding='ascii')
             print(f'Server started in background (PID {pid}).')
             raise SystemExit(0)
@@ -673,11 +707,11 @@ if __name__ == '__main__':
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{args.port}')).start()
 
-    import socket
-    try:
-        ip = socket.gethostbyname(socket.gethostname())
-    except Exception:
-        ip = '?.?.?.?'
+    ip = get_local_ip()
+
+    zc = start_mdns(ip, args.port)
+    if zc is not None:
+        atexit.register(zc.close)
 
     print(f"Skydimo LED Web Server")
     print(f"  Layout : 3-side (left, top, right)")
@@ -685,6 +719,8 @@ if __name__ == '__main__':
     print(f"  LEDs   : {N_LEDS}")
     print(f"  Local  : http://localhost:{args.port}")
     print(f"  Network: http://{ip}:{args.port}  (open on phone)")
+    if zc is not None:
+        print(f"  mDNS   : http://{MDNS_HOSTNAME[:-1]}:{args.port}  (open on phone)")
     print(f"  Stop   : Ctrl+C")
 
     uvicorn.run(app, host='0.0.0.0', port=args.port, log_level='warning')
